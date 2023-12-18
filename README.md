@@ -14,9 +14,11 @@ Invoke-LsassDump                -   dumps credentials from LSASS process
 
 ## Acknowledgments
 
-DpapiDump is based on the following project:
+DpapiDump is based on the following projects:
 
   * [SharpDPAPI](https://github.com/GhostPack/SharpDPAPI), by @harmj0y
+
+  * [WifiSquid](https://github.com/k-mistele/wifi-squid)
 
 HiveDump is based on the following projects:
 
@@ -27,3 +29,4 @@ HiveDump is based on the following projects:
 LsassDump is based on the following project:
 
   * [MiniDump](https://github.com/cube0x0/MiniDump), by @cube0x0
+  
