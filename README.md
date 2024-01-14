@@ -6,7 +6,8 @@ PowerDump project includes various PowerShell scripts for Windows credential har
 ## Functions
 
 ```
-Invoke-DpapiDump                -   dumps credentials protected by DPAPI
+Invoke-DpapiDump                -   dumps system credentials protected by DPAPI
+Invoke-DpapiUserDump            -   dumps current user credentials protected by DPAPI
 Invoke-HiveDump                 -   dumps credentials from registry hives
 Invoke-LsassDump                -   dumps credentials from LSASS process
 ```
