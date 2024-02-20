@@ -136,7 +136,7 @@ Function Invoke-DpapiDump {
         "HKLM:\Software\Microsoft\Wlansvc\Profiles"
     )
     # Get WiFi profile files
-    Get-ChildItem -Path "$Env:ProgramData\Microsoft\Wlansvc\Profiles\Interfaces" -Recurse -Force | Where-Object {-not $_.PSIsContainer} | ForEach-Object {
+    Get-ChildItem -Path "$Env:ProgramData\Microsoft\Wlansvc\Profiles\Interfaces" -Recurse -Force -ErrorAction SilentlyContinue | Where-Object {-not $_.PSIsContainer} | ForEach-Object {
         $profileFile = $_.FullName
         $profileName = $_.BaseName
         Write-Verbose "[*] Found WiFi profile file: $profileFile"
